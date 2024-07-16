@@ -1,0 +1,701 @@
+---
+title: "Text Analysis at IQMR 2"
+author: "Michelle Bueno Vásquez"
+date: today
+
+format:
+  html:
+    toc: true
+    embed-resources: true
+    code-fold: show
+    link-external-newwindow: true
+    fig-dpi: 300
+    code-overflow: wrap
+    code-tools: true
+    
+execute:
+  warning: false
+  cache: true
+
+from: markdown+emoji
+---
+
+<style>
+/* This targets the code inside the pre tag for output */
+pre:not(.sourceCode.r) code {
+  color: #355bae;
+  background-color: #f3ffff;
+  padding: 10px;
+  border-radius: 1px;
+  font-size: 10px
+}
+</style>
+
+:::{.callout-note}
+All credit for these materials go to Professor Ben Noble, I just compiled it into a nice html format
+:::
+
+# Lab 4: Predicting Nostalgia
+
+You will need to install the `dataverse` package (and the other packages mentioned):
+
+```{r load-libs}
+library(glmnet)
+library(tidyverse)
+library(dataverse)
+library(quanteda)
+```
+[Data comes from Muller and Proksch (2023)](https://www.cambridge.org/core/journals/british-journal-of-political-science/article/nostalgia-in-european-party-politics-a-textbased-measurement-approach/41C48D60B039F3081EB522FB76646E96#article)
+
+```{r nostalgia-data}
+nostalgia <- get_dataframe_by_name(
+  filename = "data_coded_all.tab",
+  dataset = "https://doi.org/10.7910/DVN/W8VGJF", 
+  server = "dataverse.harvard.edu")
+
+```
+
+### Here, we will create three different sets, our training, test, and validation
+
+```{r sets}
+# sets
+set.seed(20240612)
+# randomly sample 30% of the data for testing and validating
+test_ids <- sample(nostalgia$doc_id, nrow(nostalgia) * 0.3)
+# hold out 10% of the total df for our final validation
+held_out_ids <- sample(test_ids, length(test_ids) * (1/3))
+# get the other 20% as test data
+test_set <- nostalgia %>% filter(doc_id %in% test_ids & !doc_id %in% held_out_ids)
+# finally, get our training data
+train_set <- nostalgia %>% filter(!doc_id %in% test_ids)
+
+```
+
+Then we use some standard pre-processing to construct our dfm
+
+```{r preprocessing-nostalgia-dfm}
+nostalgia_train_dfm <- corpus(train_set) %>% 
+    tokens(remove_numbers = TRUE, 
+        remove_punct = TRUE, 
+        remove_symbols = TRUE,
+        remove_separators = TRUE) %>% 
+    tokens_tolower() %>%
+    tokens_remove(c(stopwords("english"))) %>%
+    tokens_select(min_nchar = 3) %>% 
+    dfm() %>% 
+    dfm_wordstem() %>% 
+    dfm_trim(min_termfreq = 10, termfreq_type = 'count',
+        min_docfreq = 10, docfreq_type = 'count')
+```
+
+
+
+Now, we train our lasso model:
+
+We will also use a logit model here to predict a binary class
+
+:::{.callout-note}
+alpha = 1 is for lasso.
+
+this will do cross validation to select the best $\lambda$ 
+:::
+
+```{r lasso-model-train}
+cv_model <- cv.glmnet(nostalgia_train_dfm, train_set$nostalgic, alpha = 1, family = "binomial")  
+```
+
+We can view this cross validation process, notice how the first solid line is at about -4.3. this value of lambda minimized prediction error
+
+```{r cv-plot}
+plot(cv_model)
+```
+
+We can view inside the model object here
+
+```{r best-lambda}
+
+log(cv_model$lambda.min)
+
+```
+
+We can also visualize the shrinkage process
+
+```{r shrinkage-process}
+
+plot(cv_model$glmnet.fit,
+     xvar = "lambda",
+     label = TRUE) 
+
+```
+
+Let's look at the most important coefficients as identified by the model
+
+```{r best-coefficients-vector}
+
+best_coefs <- coef(cv_model,
+                   s = "lambda.min")
+
+```
+
+Positive coefficients are stronger predictors of nostalgia
+- We see words like history, heritage, and tradition show up (makes sense!)
+- We also see words like new, women, and european are more predictive of a document being not nostalgia (makes sense!)
+
+```{r}
+
+head(sort(best_coefs[,1]))
+
+```
+
+
+
+### Testing model on test data 
+Let's turn to testing how well our model performs on our test data
+
+To do so, we need to create a dfm that only includes words used to train the model (our model wouldn't know what to do with a word outside of its vocab)
+
+We will pre-process test data using the same pre-processing steps
+
+```{r test-set-preprocessing}
+test_dfm <- corpus(test_set)  %>% 
+    tokens(remove_numbers = TRUE, 
+        remove_punct = TRUE, 
+        remove_symbols = TRUE,
+        remove_separators = TRUE) %>% 
+    tokens_tolower() %>%
+    tokens_remove(c(stopwords("english"))) %>%
+    tokens_select(min_nchar = 3) %>% 
+    dfm() %>% 
+    dfm_wordstem() %>% 
+    dfm_trim(min_termfreq = 10, termfreq_type = 'count',
+        min_docfreq = 10, docfreq_type = 'count')
+```
+
+
+Match terms between training and test
+
+```{r match-terms}
+matched_test_terms <- dfm_match(test_dfm, 
+                                features = featnames(nostalgia_train_dfm)) 
+
+```
+
+### Predict a probability  
+We can now predict the probability any given document in our test set is  nostalgic, the output is a probability
+
+```{r prediction-set}
+predictions <- predict(cv_model,
+                       newx = matched_test_terms,
+                       s = "lambda.min",
+                       type = "response")
+```
+
+\break
+
+### Let's look to see some representative texts
+
+This is the text that is predicted to be most nostalgic:
+
+```{r most-nostalgic}
+nostalgia %>% filter(doc_id == 
+                       rownames(predictions)[
+                         which.max(predictions)
+                         ]) %>% 
+  pull(text)
+```
+
+and here is the least nostalgic:
+```{r least-nostalgic}
+
+nostalgia %>% filter(doc_id == 
+                       rownames(predictions)[
+                         which.min(predictions)
+                         ]) %>% pull(text)
+
+```
+Seems pretty good!
+
+### "Round" off the probabilities
+
+We can also use predict to "round" off the probabilities and give us a 0/1
+
+```{r round-probabilities}
+predictions_class <- predict(cv_model, 
+                             newx = matched_test_terms, 
+                             s = "lambda.min", 
+                             type = "class")
+```
+
+
+### Confusion Matrix
+We can create a confusion matrix to see how we did
+
+```{r confusion-matrix}
+conf_mat <- table(true = test_set$nostalgic, 
+                  pred = as.numeric(predictions_class))
+
+```
+
+#### Measuring accuracy:
+```{r accuracy}
+(conf_mat[1,1] + conf_mat[2,2])/sum(conf_mat)
+
+```
+Accuracy is 92%, which is quite good
+
+
+
+#### Proportion of 1s that were actually correct:
+```{r}
+conf_mat[2,2]/sum(conf_mat[,2])
+```
+:::{.callout-tip}
+But note that nostalgia is rare, so we can get good accuracy just by defaulting to 0 precision tells us proportion of 1s that were actually correct 87% because it very rarely said 1 when it was 0
+:::
+
+##### Propotion of actual positives:
+
+```{r}
+conf_mat[2,2]/sum(conf_mat[2,])
+```
+
+:::{.callout-tip}
+This tell us proportion of actual positives that were identified correctly ... only 46%, very bad!
+:::
+
+
+#### So the model under-predicts nostalgia, what should we do? 
+We could try different pre-processing, use different model(s), code more docs
+
+(Time permitting)
+Try to replicate the training process on the training and test data and predict on the test data here are the datasets you'll need to get your started
+
+```{r time-permitting}
+held_out <- nostalgia %>% filter(doc_id %in% held_out_ids)
+train_and_test <- nostalgia %>% filter(!doc_id %in% held_out_ids)
+```
+
+# Lab 5 
+## Part I: GloVe "by hand"
+Let's get a better understanding of how the GloVe algorithm (and word 
+embeddings generally) work by walking through the GloVe algorithm. To begin our discussion, let's try to fit a GloVe embedding model on the full text of Dr. Seuss's Green Eggs and Ham. Famously, Dr. Suess's editor bet him that he could not write a book using just 50 words, and Green Eggs and Ham was the result. 
+
+We can read in the text of green eggs and ham:
+```{r green-eggs-and-ham-text}
+corpus <- readLines('https://www.site.uottawa.ca/~lucia/courses/2131-02/A2/trythemsource.txt')[-c(1,117)] 
+
+# Lower case and create individual tokens
+tokens <- unlist(strsplit(tolower(corpus), "\\W+"))
+
+# Remove empty space
+tokens <- tokens[tokens != '']
+
+# unique vocabulary
+vocab <- unique(tokens)
+
+# number of unique terms
+vocab_size <- length(vocab)
+
+# Assign each word a unique id number
+vocab_index <- setNames(seq_along(vocab), vocab)
+
+```
+
+
+
+
+
+
+### Function to create a co-occurrence matrix
+
+:::{.callout-note}
+Note, we set the context window size to three words on either side (aka, 6)
+:::
+
+Steps the code below will take:
+  - Initialize an empty co-occurrence matrix with dimensions equal to the vocabulary size 
+  - Loop over each token in the tokenized text
+  - Print the current index to track progress
+  - Get the current token and its index in the vocabulary
+  - Define the window range around the current token
+  - Loop over the context window
+  - Skip the current token itself
+  - Get the context token and its index in the vocabulary
+  - Increment the co-occurrence count for the token-context pair
+  - Return the filled co-occurrence matrix
+
+
+
+
+```{r co-occurrence-for-loop}
+create_cooccurrence_matrix <- function(tokens, 
+                                       vocab_index, 
+                                       window_size = 3) {
+  cooccurrence_matrix <- matrix(0, 
+                                nrow = length(vocab_index), 
+                                ncol = length(vocab_index))
+  for (i in seq_along(tokens)) {
+    print(i)
+    token <- tokens[i]
+    token_index <- vocab_index[[token]]
+    window_start <- max(1, i - window_size)
+    window_end <- min(length(tokens), i + window_size)
+    for (j in window_start:window_end) {
+      if (i != j) {
+        context_token <- tokens[j]
+        context_index <- vocab_index[[context_token]]
+        cooccurrence_matrix[token_index, context_index] <- 
+          cooccurrence_matrix[token_index, context_index] + 1
+      }
+    }
+  }
+  return(cooccurrence_matrix)
+}
+```
+
+
+
+### Create co-occurrence matrix
+```{r co-occurence-matrix, results = 'hide'}
+cooccurrence_matrix <- create_cooccurrence_matrix(tokens, vocab_index)
+# assign text names
+rownames(cooccurrence_matrix) <- vocab
+colnames(cooccurrence_matrix) <- vocab
+# print first few rows
+head(cooccurrence_matrix)
+
+set.seed(20240616)
+```
+
+### Initialize word vectors and biases
+```{r wordvec-biases}
+# Set our embedding dimensions to 50
+embedding_dim <- 50
+
+# We initialize word and context vectors with random values
+word_vectors <- matrix(runif(vocab_size * embedding_dim, 
+                             -0.5, 0.5), 
+                       nrow = vocab_size)
+
+context_vectors <- matrix(runif(vocab_size * embedding_dim, 
+                                -0.5, 0.5), 
+                          nrow = vocab_size)
+
+# Same for the bias terms
+word_bias <- runif(vocab_size, -0.5, 0.5)
+context_bias <- runif(vocab_size, -0.5, 0.5)
+
+```
+
+ We may have some intuition that the words "ham" and "eggs" should be quite similar in this corpus due to their frequent co-occurrence; the words ham and fox should not be very similar. We can see at the start of the training process that the cosine similarity for cos(ham, eggs) is basically 0 and same for cos(ham, fox) due to the random initialization 
+   - numerator is the dot product of both vectors
+   - denominator is the product of the sqrt of the squared sum of both vectors
+
+```{r}
+
+# Cosine similarity function
+cos_sim <- function(vector1, vector2){
+  numerator <- sum(vector1 * vector2)
+  denominator <- sqrt(sum(vector1^2)) * sqrt(sum(vector2^2))
+  cs <- numerator/denominator
+  return(cs)
+}
+```
+
+Note: we combine word and context vectors to capture word similarities when $word_i$ is the target and when it is in the context of other words
+
+```{r}
+first_embeddings <- word_vectors + context_vectors
+ham_emb <- first_embeddings[vocab_index['ham'],]
+egg_emb <- first_embeddings[vocab_index['eggs'],]
+fox_emb <- first_embeddings[vocab_index['fox'],]
+
+```
+
+### Cosine similarity of ham and eggs, of ham and fox
+Note that ham and eggs are less similar than ham and fox to start due to randomization 
+
+```{r}
+cos_sim(ham_emb, egg_emb)
+cos_sim(ham_emb, fox_emb)
+```
+
+
+### Training parameters
+How quickly the model updates
+```{r}
+
+learning_rate <- 0.05
+```
+
+
+These two parameters control the weights applied which helps account for  words that co-occur frequently (e.g., "the")
+```{r}
+x_max <- 50
+alpha <- 0.75
+```
+
+
+How many model iterations we'll run
+```{r}
+iterations <- 100
+
+```
+
+Create some empty vectors to store the running cosine similarity of vectors of interest for demo purposes
+
+```{r}
+cs_hamegg <- cs_hamfox <- c()
+
+```
+
+Number of iterations for training
+```{r results='hide'}
+for (iter in 1:iterations) {
+  print(iter)
+  for (i in 1:vocab_size) {
+    for (j in 1:vocab_size) {
+      if (cooccurrence_matrix[i, j] > 0) {
+        weight <- (cooccurrence_matrix[i, j] / x_max)^alpha
+        weight <- ifelse(weight > 1, 1, weight)
+        dot_product <- sum(word_vectors[i, ] * context_vectors[j, ])
+         cost <- dot_product + word_bias[i] + context_bias[j] - log(cooccurrence_matrix[i, j])
+         word_grad <- weight * cost * context_vectors[j, ]
+         context_grad <- weight * cost * word_vectors[i, ]
+         word_bias_grad <- weight * cost
+         context_bias_grad <- weight * cost
+         word_vectors[i, ] <- word_vectors[i, ] - learning_rate * word_grad
+         context_vectors[j, ] <- context_vectors[j, ] - learning_rate * context_grad
+         word_bias[i] <- word_bias[i] - learning_rate * word_bias_grad
+          context_bias[j] <- context_bias[j] - learning_rate * context_bias_grad
+
+      }
+    }
+  }
+  # Print a message indicating the completion of the current iteration
+  cs_hamegg <- c(cs_hamegg, cos_sim(word_vectors[vocab_index['ham'],] + context_vectors[vocab_index['ham'],], word_vectors[vocab_index['eggs'],] + context_vectors[vocab_index['eggs'],]))
+  
+  cs_hamfox <- c(cs_hamfox, cos_sim(word_vectors[vocab_index['ham'],] + context_vectors[vocab_index['ham'],], word_vectors[vocab_index['fox'],] + context_vectors[vocab_index['fox'],]))
+
+    cat("Iteration:", iter, "completed\n")
+}
+```
+
+- Print the current iteration to track progress
+- Loop over each word in the vocabulary
+- Loop over each context word in the vocabulary
+- Only update if the co-occurrence count is greater than zero
+- Calculate the weighting function f(X_ij)
+-  Cap the weight at 1
+- Compute the dot product of the word and context vectors
+- Calculate the cost function J for the given word-context pair
+- Compute the gradient for the word vector
+- Compute the gradient for the context vector
+- Compute the gradient for the word bias
+- Compute the gradient for the context bias
+- Update the word vector using the gradient
+- Update the context vector using the gradient
+- Update the word bias using the gradient
+- Update the context bias using the gradient
+
+
+
+Here, we plot the cosine similarity of each iteration of ham and egg (red) and ham and fox (blue). Over time, cos(ham, egg) increases substantially and cs(ham, fox) modestly declines.
+
+```{r}
+data <- data.frame(
+  x = 1:100,
+  cs_hamegg,
+  cs_hamfox
+)
+
+ggplot(data) + 
+  geom_line(aes(x = x, 
+                y = cs_hamegg), 
+            color = 'red') + 
+  geom_line(aes(x = x, 
+                y = cs_hamfox), 
+            color = 'blue')  +
+  theme_minimal()
+
+```
+Combine word and context vectors
+```{r}
+final_embeddings <- word_vectors + context_vectors
+```
+
+
+
+# Show final embedding cosine
+similarity---ham and eggs are much more similar than ham and fox
+
+```{r}
+cos_sim(final_embeddings[vocab_index['ham'],], final_embeddings[vocab_index['eggs'],])
+cos_sim(final_embeddings[vocab_index['ham'],], final_embeddings[vocab_index['fox'],])
+```
+
+Sam and am are also similar
+```{r}
+cos_sim(final_embeddings[vocab_index['sam'],], final_embeddings[vocab_index['am'],])
+```
+
+
+
+
+## Part II: Using pre-training embeddings
+Sometimes you will train your own embeddings, but often, you can use 
+
+This will read in the 300d glove vectors pre-trained on wikipedia from Noble's dropbox, it will take a minute
+
+```{r}
+# pre-trained embeddings. 
+library(tidytext)
+library(quanteda)
+library(lsa)
+```
+
+
+
+```{r}
+glove300 <- read_csv('https://www.dropbox.com/scl/fi/tv2nmic7bduiz9rhe1ud3/iqmr-glove300.csv?rlkey=vu4z5vbyb2h5x3bc4joekxrop&raw=1')
+head(glove300)
+```
+
+Just for demonstration, let's find the words in our embedding space most similar to 'president'
+
+```{r results='hide'}
+# extract the embedding for president
+pres_emb <- unlist(glove300 %>% filter(word == 'president') %>% select(-word))
+
+# create an empty vector
+cs_vec <- c()
+for(i in 1:nrow(glove300)){
+  print(i)
+  # compute cosine similarity between the president embedding and every word in
+  # the embedding space (note, this can take a long time)
+cs_vec <- c(cs_vec, 
+            cosine(pres_emb, 
+            unlist(glove300[i,-1])))
+}
+
+```
+
+
+Align scores and words
+
+```{r}
+cs_scores <- tibble(cs_vec, 
+                    row = 1:nrow(glove300))
+
+# look at the top 20 nearest neighbors---they are all relevant
+glove300[cs_scores %>% 
+           arrange(desc(cs_vec)) %>% 
+           head(n = 20) %>% 
+           pull(row), 
+         'word']
+```
+
+
+Read in trump tweets, just using those sent in 2017 for size/speed
+
+```{r}
+trump_tweets <- read_csv('https://raw.githubusercontent.com/MarkHershey/CompleteTrumpTweetsArchive/master/data/realDonaldTrump_in_office.csv') %>% 
+  rename(id = ID, 
+         time = Time, 
+         url = `Tweet URL`, 
+         text = `Tweet Text`) %>% 
+  filter(time < '2018-01-01')  %>% 
+  mutate(text = tolower(text))
+
+```
+
+
+```{r}
+# tokenize 
+tt_pp <- trump_tweets %>% 
+  unnest_tokens(word, text) %>% 
+  anti_join(tibble(word = stopwords('en')))
+
+# merge words with pre-trained embeddings
+tt_words <- tt_pp %>% 
+  left_join(glove300)
+
+
+# average across the embeddings at the tweet level, this creates a tweet-level embedding
+tt_emb_avg <- tt_words %>% 
+  group_by(url) %>% 
+  summarise(across(x1:x300,
+                   mean, 
+                   na.rm = TRUE))
+
+
+# this tweet is about buying american, what are the most similar tweets?
+trump_tweets[8,'text']
+
+
+# this is the same process as we did above (doesn't take too long)
+cs_vec <- c()
+for(i in 1:nrow(tt_emb_avg)){
+  cs_vec <- c(cs_vec, cosine(unlist(tt_emb_avg[8,-1]), unlist(tt_emb_avg[i,-1])))
+}
+
+# align tweets and rows
+cs_df <- tibble(cs = cs_vec, i = 1:nrow(tt_emb_avg))
+
+# look at scores
+head(cs_df %>% arrange(desc(cs)))
+
+# top tweets, not bad!
+trump_tweets[cs_df %>% arrange(desc(cs)) %>% head() %>% pull(i), 'text']
+```
+
+We can do other kinds of analysis as well, for instance, are trump's tweets about democrats or republicans more positive? 
+```{r}
+# this code will extract urls for tweets that use the word "democrat"
+d_tweets <- trump_tweets %>% filter(grepl('democrat', text)) %>% pull(url)
+
+# this code will extract urls for tweets that use the word "republican"
+r_tweets <- trump_tweets %>% filter(grepl('republican', text)) %>% pull(url)
+
+# we'll use the word "good" as a proxy for positivity
+good <- glove300 %>% filter(word == 'good') %>% select(-word) %>% unlist()
+
+# extract the emebddings for all democrat referencing tweets
+dem_emb <- tt_emb_avg %>% filter(url %in% d_tweets) %>% select(-url)
+
+# extract the embeddings for all republican referencing tweets
+rep_emb <- tt_emb_avg %>% filter(url %in% r_tweets) %>% select(-url)
+
+```
+
+Compute similarity of each democrat speech embedding to "good"
+
+```{r}
+cs_dem <- c()
+for (i in 1:nrow(dem_emb)){
+  cs_dem <- c(cs_dem, cosine(good, dem_emb[i,] %>% unlist()))
+}
+
+```
+
+Compute similarity of each republican speech embedding to "good"
+
+```{r}
+cs_rep <- c()
+for (i in 1:nrow(rep_emb)){
+  cs_rep <- c(cs_rep, cosine(good, rep_emb[i,] %>% unlist()))
+}
+```
+
+Average cosine similarity of democrat-referencing speeches
+
+```{r}
+mean(cs_dem)
+```
+
+Average cosine similarity of republican-referencing speeches
+
+```{r}
+mean(cs_rep)
+```
+

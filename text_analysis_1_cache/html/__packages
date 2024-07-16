@@ -1,0 +1,16 @@
+quanteda
+quanteda.corpora
+stringr
+tidyverse
+ggplot2
+tibble
+tidyr
+readr
+purrr
+dplyr
+forcats
+lubridate
+tidytext
+stringi
+textdata
+stm

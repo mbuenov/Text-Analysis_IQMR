@@ -1,0 +1,10 @@
+name: Publish Document
+title:
+username:
+account: rpubs
+server: rpubs.com
+hostUrl: rpubs.com
+appId: https://api.rpubs.com/api/v1/document/1198811/4db65ef4b5fd48e990c298fd2d947b50
+bundleId: https://api.rpubs.com/api/v1/document/1198811/4db65ef4b5fd48e990c298fd2d947b50
+url: http://rpubs.com/mbuenov/1198811
+version: 1
